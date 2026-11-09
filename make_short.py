@@ -1,11 +1,12 @@
 """
 Serialized mystery Shorts: one story split into daily parts.
 Hindi narration, English subtitles, every part ends with a cliffhanger question.
+Powered by 100% FREE Google Gemini API & Edge-TTS.
 
 Setup:
-    pip install anthropic edge-tts moviepy pillow numpy
+    pip install google-genai edge-tts moviepy pillow numpy
     (FFmpeg must be installed)
-    export ANTHROPIC_API_KEY="your-key"
+    export GEMINI_API_KEY="your-free-gemini-key"
 
 Run (creates a new series the first time, then continues it):
     python make_short.py                      # default story seed
@@ -24,8 +25,8 @@ import math
 import os
 import re
 import sys
+import urllib.request
 
-import anthropic
 import edge_tts
 import numpy as np
 from moviepy import AudioFileClip, VideoClip, concatenate_videoclips
@@ -33,7 +34,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 W, H, FPS = 1080, 1920, 30
 VOICE = "hi-IN-MadhurNeural"      # female alternative: hi-IN-SwaraNeural
-MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OUT = "output"
 SERIES_FILE = "series.json"
 ARC_LENGTH = 12
@@ -66,16 +67,45 @@ def load_font(size):
     return ImageFont.load_default()
 
 
-# ---------- Claude helpers ----------
-def ask_json(prompt, max_tokens=3000):
-    client = anthropic.Anthropic()
-    msg = client.messages.create(
-        model=MODEL, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}]
-    )
-    match = re.search(r"\{.*\}", msg.content[0].text, re.DOTALL)
-    if not match:
-        raise ValueError(f"Failed to parse JSON from LLM response: {msg.content[0].text}")
-    return json.loads(match.group(0))
+# ---------- Gemini API helpers (100% Free) ----------
+def ask_json(prompt):
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY environment variable is not set! Get a free key at https://aistudio.google.com/app/apikey")
+
+    # Try official google-genai SDK first
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        return json.loads(response.text)
+    except Exception as sdk_err:
+        # Fallback to direct REST API
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json"}
+            }
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text)
+        except Exception as rest_err:
+            raise RuntimeError(f"Gemini API request failed via SDK ({sdk_err}) and REST ({rest_err})")
 
 
 def new_series(seed):
@@ -88,7 +118,7 @@ Rules:
 - Exactly {ARC_LENGTH} parts. Each beat must end on a hook or twist.
 - Plant clues early so the final reveal feels earned and satisfying.
 
-Return ONLY JSON:
+Return ONLY JSON matching this structure:
 {{
   "title_en": "short series title",
   "premise": "3-4 sentences",
@@ -136,7 +166,7 @@ Requirements:
   (for example "Do you think X is lying? Comment your guess!"), in Hindi.
 - subtitle_en is a natural English translation of narration_hi.
 
-Return ONLY JSON:
+Return ONLY JSON matching this structure:
 {{
   "hook_title_en": "intriguing title under 50 chars",
   "summary_en": "2 sentences on what happened in this part (for story memory)",
